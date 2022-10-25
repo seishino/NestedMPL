@@ -1,0 +1,128 @@
+version: 2.1
+
+workflows:
+  build_and_test:
+    jobs:
+      - build
+      - jenkins_test:
+          jenkins_version: lts
+
+  nightly_jenkins_test:
+    triggers:
+      - schedule:
+          cron: "0 6 * * *"
+          filters:
+            branches:
+              only:
+                - master
+    jobs:
+      - jenkins_test:
+          jenkins_version: lts
+      - jenkins_test:
+          jenkins_version: latest
+
+jobs:
+  build:
+    docker:
+      - image: circleci/openjdk:11-jdk
+
+    working_directory: ~/repo
+
+    environment:
+      # Customize the JVM maximum heap limit
+      MAVEN_OPTS: -Xmx3200m
+
+    steps:
+      - checkout
+
+      # CircleCI cache now not free
+      # Download and cache dependencies
+      #- restore_cache:
+      #    keys:
+      #      - v1-dependencies-{{ checksum "pom.xml" }}
+      #      # fallback to using the latest cache if no exact match is found
+      #      - v1-dependencies-
+
+      - run: mvn -B dependency:go-offline
+
+      # CircleCI cache now not free
+      #- save_cache:
+      #    paths:
+      #      - ~/.m2
+      #    key: v1-dependencies-{{ checksum "pom.xml" }}
+
+      # Executing build
+      - run:
+          name: Creating artifacts and executing tests
+          command: mvn -B clean package
+
+      - run:
+          name: Collecting artifacts and test reports
+          when: always
+          command: |
+            mkdir -p results/artifacts results/reports
+            cp -a target/surefire-reports results/reports/junit
+            cp -a target/*.jar results/artifacts
+
+      - store_test_results:
+          path: results/reports
+
+      - store_artifacts:
+          path: results
+          destination: results
+
+  jenkins_test:
+    parameters:
+      jenkins_version:
+        description: |
+          Jenkins version to use (default empty - use version from the Dockerfile):
+          * <version> - exact version you need
+          * lts    - latest available LTS version
+          * latest - latest available version
+        default: ""
+        type: string
+    docker:
+      - image: circleci/openjdk:11-jdk
+    working_directory: ~/repo
+    steps:
+      - checkout
+
+      - setup_remote_docker
+          # CircleCI cache now not free
+          # docker_layer_caching: true
+
+      - run:
+          name: Build jenkins image
+          command: docker build -t jenkinsbro --build-arg "JENKINS_VERSION=$(.circleci/get_jenkins_version.sh << parameters.jenkins_version >>)" .circleci/jenkins
+          no_output_timeout: 5m
+
+      - run:
+          name: Create jenkins_home container to store data
+          command: | # CircleCI using remote docker server - so we can't just mount the folder...
+            docker create -v /var/jenkins_home --name jenkins-home alpine /bin/true
+            docker run --rm -it --volumes-from jenkins-home alpine chown -R 1000:1000 /var/jenkins_home
+
+      - run:
+          name: Run jenkins and mpl tests
+          command: >
+            docker run -e "MPL_VERSION=$(echo "${CIRCLE_BRANCH}" | sed 's|\(pull/[0-9]*\)|\1/merged|g')"
+            -e "MPL_REFSPEC=$(echo "${CIRCLE_BRANCH}:remotes/origin/${CIRCLE_BRANCH}" | sed -e '/^pull/! s|\(.*\)|heads/\1|' -e 's|\(pull/[0-9]*\)|\1/merged|g')"
+            -e "MPL_CLONE_URL=$(echo "${CIRCLE_REPOSITORY_URL}" | sed 's|git@github.com:|https://github.com/|')"
+            -e "HTTP_PORT=8085"
+            --name jenkins --rm -it --volumes-from jenkins-home jenkinsbro
+          no_output_timeout: 5m
+
+      - run:
+          name: Collecting test reports
+          when: always
+          command: |
+            mkdir -p results/artifacts results/reports
+            docker cp jenkins-home:/var/jenkins_home/junit_report results/reports/junit
+            docker rm jenkins-home
+
+      - store_test_results:
+          path: results/reports
+
+      - store_artifacts:
+          path: results
+          destination: results
