@@ -1,0 +1,1 @@
+bat "echo 'this is nested build and deploy'"
