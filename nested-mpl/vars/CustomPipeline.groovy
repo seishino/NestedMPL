@@ -5,7 +5,7 @@ def call(body){
     modules: [
       Checkout: [:],
       BuildAndDeploy: [:],
-      Deploy: [:]
+      Test: [:]
     ]
   ])
 
